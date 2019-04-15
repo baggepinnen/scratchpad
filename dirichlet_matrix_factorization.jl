@@ -1,7 +1,7 @@
 using Flux, Flux.Tracker
 using Flux.Tracker: data
 
-m,n,k = 100,20,5
+m,n,k = 20,10,3
 
 W = rand(m,k)
 H = rand(k,n)
@@ -52,3 +52,39 @@ norm(A-Wh*softmax(Hh))/norm(A)
 
 x = LinRange(0.1,0.9,20)
 plot3d(,, (x,y)->dir([x,y],0.1))
+
+
+## Using Turing
+using Turing
+
+@model dmf(A, k) = begin
+    m,n = size(A)
+    α = 1/m
+    h = Vector{Vector{Real}}(undef, n)
+    w = Vector{Vector{Real}}(undef, m)
+    s ~ InverseGamma(1,0.1)
+    for j = 1:n
+        h[j] ~ Dirichlet(k,α)
+    end
+    for i = 1:m
+        w[i] ~ MvNormal(k,3)
+    end
+
+  for j = 1:n, i = 1:m
+      A[i,j] ~ Normal(w[i]'h[j], sqrt(s))
+  end
+end
+
+#  Run sampler, collect results
+chn = sample(dmf(A, k), HMC(600, 0.1, 5))
+describe(chn)
+
+using StatsPlots
+plot(chn)
+meanplot(chn)
+s = sample(chn, 1)
+Hh = reshape(Array(s[:h].value), k,n)
+Wh = reshape(Array(s[:w].value), k,m)'
+
+Ah = Wh*Hh
+norm(A-Ah)/norm(A)
