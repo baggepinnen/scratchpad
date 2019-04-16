@@ -4,11 +4,7 @@ using Flux.Tracker: data
 m,n,k = 20,10,3
 
 W = rand(m,k)
-H = rand(k,n)
-H[H .< 0.3] .= 0 # H is now 30% sparse
-H[:,(sum(H, dims=1) .== 0)[:]] .= 1/k
-H = H ./ sum(H, dims=1)
-@assert !any(isnan, H)
+H = softmax(5randn(k,n))
 A = W*H
 
 function rank_k_svd(A,k)
@@ -88,3 +84,21 @@ Wh = reshape(Array(s[:w].value), k,m)'
 
 Ah = Wh*Hh
 norm(A-Ah)/norm(A)
+
+
+
+# KSVD
+Ws, Hs = ksvd(A, 20, max_iter = 500, max_iter_mp = 600, sparsity_allowance = 0.99)
+norm(A-Ws*Hs)
+heatmap(abs.(Hs))
+
+
+using LowRankModels
+losses = QuadLoss() # minimize squared distance to cluster centroids
+ry = SimplexConstraint()
+rx = ZeroReg() # no regularization on the cluster centroids
+glrm = GLRM(A,losses,rx,ry,k)
+
+Wlr,Hlr,ch = fit!(glrm)
+Alr = Wlr'*Hlr
+norm(A-Alr)
