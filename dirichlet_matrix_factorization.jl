@@ -46,9 +46,6 @@ end
 norm(A-Asvd)/norm(A)
 norm(A-Wh*softmax(Hh))/norm(A)
 
-x = LinRange(0.1,0.9,20)
-plot3d(,, (x,y)->dir([x,y],0.1))
-
 
 ## Using Turing
 using Turing
@@ -98,7 +95,16 @@ losses = QuadLoss() # minimize squared distance to cluster centroids
 ry = SimplexConstraint()
 rx = ZeroReg() # no regularization on the cluster centroids
 glrm = GLRM(A,losses,rx,ry,k)
-
-Wlr,Hlr,ch = fit!(glrm)
+pars = ProxGradParams(1.0; # initial stepsize
+				        max_iter=500, # maximum number of outer iterations
+                inner_iter_X=1, # how many prox grad steps to take on X before moving on to Y (and vice versa)
+                inner_iter_Y=1, # how many prox grad steps to take on Y before moving on to X (and vice versa)
+                inner_iter=1,
+                abs_tol=1e-9, # stop if objective decrease upon one outer iteration is less than this * number of observations
+                rel_tol=1e-8)
+Wlr,Hlr,ch = fit!(glrm, pars)
 Alr = Wlr'*Hlr
 norm(A-Alr)
+
+plot(A, c=:blue, layout=n, legend=false)
+plot!(Alr, c=:red)
