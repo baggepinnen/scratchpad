@@ -1,5 +1,5 @@
 cd(@__DIR__)
-using Plots, Flux, Zygote, LinearAlgebra, Parameters, Statistics, Random, Printf, OrdinaryDiffEq, IterTools, Distributions
+using Plots, Flux, Zygote, LinearAlgebra, Parameters, Statistics, Random, Printf, OrdinaryDiffEq, IterTools, Distributions, ChangePrecision
 using Flux: params
 default(lab="", grid=false)
 # include("SkipRNN.jl")
@@ -22,7 +22,7 @@ end
 
 const h = 0.1
 
-function pendcart(xd,x,p,t)
+@changeprecision Float32 function pendcart(xd,x,p,t)
     g = 9.82; l = 1.0; d = 0.5
     u = 0
     xd[1] = x[2]
@@ -30,9 +30,9 @@ function pendcart(xd,x,p,t)
     xd
 end
 
-function generate_data(T)
-    u0 = @. [pi, 6] * 2 *(rand()-0.5)
-    tspan = (0.0,T)
+@changeprecision Float32 function generate_data(T)
+    u0 = @. Float32[pi, 6] * 2 *(rand(Float32)-0.5)
+    tspan = (0f0,Float32(T))
     prob = ODEProblem(pendcart,u0,tspan)
     sol = solve(prob,Tsit5())
     z = reduce(hcat, sol(0:h:T).u)
@@ -44,7 +44,7 @@ Zygote.@adjoint function Base.reduce(::typeof(hcat), V::AbstractVector{<:Abstrac
     reduce(hcat, V), dV -> (nothing, collect(eachcol(dV)))
 end
 
-function std2(x::Matrix,μ)
+@changeprecision Float32 function std2(x::Matrix,μ)
     s = 0.
     for x in x
         s += abs2(x - μ)
@@ -52,25 +52,25 @@ function std2(x::Matrix,μ)
     sqrt(s/length(x))
 end
 
-function kl(e, dy, c = 1)
+@changeprecision Float32 function kl(e, dy, c = 1)
     μ1  = mean(e) # TODO: dims = 1
     μ2  = mean(dy)
     # lσ1 = log(std(reduce(hcat,e), dims=2))
     lσ1 = log(std2(e, μ1))  # TODO: dims = 1
     lσ2 = log(std(dy))
     l2π = log(2π)
-    l = 0.
+    l = 0f0
     for i = eachindex(μ1)
         l += c*(l2π + 2lσ2[i]) - (l2π + 2lσ1[i]) +
-        c*(exp(2lσ1[i]) + abs2(μ1[i] - μ2[i]))/(exp(2lσ2[i]) + 1e-5) - 1.0
+        c*(exp(2lσ1[i]) + abs2(μ1[i] - μ2[i]))/(exp(2lσ2[i]) + 1f-5) - 1f0
     end
-    0.5l
+    0.5f0l
 end
 # Zygote.refresh()
 # Zygote.gradient(e->kl(e,dy), randn(1,10))
 
 ##
-const dy = Normal(0, 0.05)
+const dy = Normal(0f0, 0.05f0)
 const nz = 3
 const ny = 2
 const nu = 0
@@ -79,7 +79,7 @@ np = 100
 const f  = Chain(Dense(nz+nu,N,tanh), Dense(N,nz))
 const g  = Chain(Dense(nz,N,tanh), Dense(N,ny))
 const k  = Chain(Dense(nz+ny,N,tanh), Dense(N,nz))
-const z0 = randn(nz,np)
+const z0 = Chain(Dense(3ny,N,tanh), Dense(N,nz))
 pars = params((f,g,k,z0))
 
 trajs_full = [generate_data(10) for i = 1:50]
@@ -94,7 +94,7 @@ function train(loss, ps, dataset, opt; cb=i->nothing)
     @progress for (i,d) in enumerate(dataset)
         # Flux.reset!(model)
         (l1,l2), back = Zygote.forward(()->loss(d), ps)
-        grads = back((1., 1.))
+        grads = back((1f0, 1f0))
         push!(loss1, l1)
         push!(loss2, l2)
         Flux.Optimise.update!(opt, ps, grads)
@@ -123,11 +123,11 @@ end
 ##
 
 function sim(y)
-    T = length(y)
-    z = z0
+    T   = length(y)
+    z   = z0(vcat(y[1:3]...)) .+ randn(nz,np)
     yh1 = []
     yh2 = []
-    zh = []
+    zh  = []
     for y in y
         z   = f(z)
         push!(zh, mean(z, dims=2)[:])
@@ -135,19 +135,25 @@ function sim(y)
         ŷ   = g(z)
         push!(yh1, ŷ)
         e   = y .- ŷ
-        z   = k(⊗([z;e]))
+        z   = k([z;e])
         ŷ   = g(z)
         push!(yh2, ŷ)
     end
     yh1, yh2, zh
 end
 
+# z0m = z0([y[1];y[2];y[3]])#, 1, np# + randn(nz,np)
+# z0 = Zygote.Buffer(z0m,nz,np)
+# for i = 1:np
+# z0[:,i] = z0m + randn(nz)
+# end
+# z = copy(z0)
 function loss(y)
     T = length(y)
-    z = z0
-    l1 = l2 = 0
+    z = z0([y[1];y[2];y[3]]) .+ randn(Float32,nz,np)
+    l1 = l2 = 0f0
     for y in y
-        z   = f(z) + randn(nz,np)#f([z; repeat(u[i], 1, np)])
+        z   = f(z) .+ randn(Float32,nz,np)#f([z; repeat(u[i], 1, np)])
         ŷ   = g(z)
         e   = y .- ŷ
         # l1 += sum(norm, e)/np
@@ -158,16 +164,18 @@ function loss(y)
         # l2 += sum(norm, e)/np
         l2 += kl(e, dy)
     end
-    l1/T, l2/T
+    Float32(l1/T), Float32(l2/T)
 end
-# TODO: add penalty on KL div between ŷ and postulated measurement noise density
+# ll = loss(y)[2]
 
 # loss(first(datas)...)
-opt = ADAM(0.005)
+# opt = ADAGrad(0.005f0)
+opt = ADAM(0.005f0)
 Zygote.refresh()
 # (l1,l2), back = Zygote.forward(()->loss(trajs_meas[1]), pars)
+# grads = back((1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
-train(loss, pars, IterTools.ncycle(trajs_meas, 1), opt, cb=cb)
+train(loss, pars, IterTools.ncycle(trajs_meas, 5), opt, cb=cb)
 yh1,yh2,zh = sim(trajs_meas[1])
 
 ##
