@@ -1,9 +1,10 @@
-# TODO: På vilka ställen interagerar olika partiklar med varandra?
+# TODO: På vilka ställen interagerar olika partiklar med varandra? Enligt Berntorp är feedback gain en funktion av partikelns yhat och medelpartikelns yhat
 # Gaussian ll kan hanteras analytiskt
-# kan man träna modellen åp detta sättet först och sedan träna en klassisk observerare utan att rucka på f?
+# kan man träna modellen på detta sättet först och sedan träna en klassisk observerare utan att rucka på f?
 # Vi kan hantera godtycklig dg, men är det vettigt att alltid anta Gaussisk df? z_post borde ändå kunna vara multimodal, tänk pf-testmodellen
+#
 cd(@__DIR__)
-using Plots, Flux, Zygote, LinearAlgebra, Statistics, Random, Printf, OrdinaryDiffEq, IterTools, Distributions, ChangePrecision, DSP
+using Plots, Flux, Zygote, LinearAlgebra, Statistics, Random, Printf, OrdinaryDiffEq, IterTools, Distributions, ChangePrecision, DSP, SliceMap
 using Flux: params
 default(lab="", grid=false)
 # include("SkipRNN.jl")
@@ -27,6 +28,14 @@ end
 
 const h = 0.1
 const Ta = 5000
+
+function hstack(xs, n)
+    buf = Zygote.Buffer(xs, length(xs), n)
+    for i = 1:n
+        buf[:, i] = xs
+    end
+    return copy(buf)
+end
 
 @changeprecision Float32 function generate_data_test(T)
     f(x,t) = 0.5x + 25x/(1 + x^2) + 8cos(1.2*t)
@@ -69,41 +78,29 @@ end
     μ1, σ1² = stats(e)
     lσ1 = log.(sqrt.(σ1²))
     lσ2 = log.(σ2)#log.(sqrt.(var(dy)))
-    l2π = log(2π)
     l = 0f0
     for i = eachindex(μ1)
-        l += c*(l2π + 2lσ2[i]) - (l2π + 2lσ1[i]) +
-        c*(σ1²[i] + abs2(μ1[i] - μ2[i]))/(σ2[i]^2 + 1f-5) - 1f0
+        l += c*2lσ2[i] - 2lσ1[i] +
+        c*(σ1²[i] + abs2(μ1[i] - μ2[i]))/(σ2[i]^2 + 1f-5)
     end
     0.5f0l
 end
 
 @changeprecision Float32 function klng(μ1, lσ1, c = 1)
-    σ1² = exp.(lσ1).^2
+    σ1² = exp(lσ1)^2
     # lσ1 = log.(σ1)
-    l2π = log(2π)
-    l = 0f0
-    for i = eachindex(μ1)
-        l += c*l2π - (l2π + 2lσ1[i]) +
-        c*(σ1²[i] + abs2(μ1[i])) - 1f0
-    end
-    0.5f0l
+    0.5*(2lσ1 + c*(σ1² + abs2(μ1)))
 end
 
 @changeprecision Float32 function kl2(e, c = 1)
     μ1, σ1² = stats(e)
-    l2π = log(2π)
-    l = 0f0
-    for i = eachindex(μ1)
-        l += c*l2π - l2π +  c*(1 + abs2(μ1[i])) - 1f0
-    end
-    0.5f0l
+    0.5c*sum(abs2,μ1[i])
 end
 # Zygote.refresh()
 # Zygote.gradient(e->kl(e,dy), randn(1,10))
 
 ##
-trajs_full = [generate_data_pendcart(1) for i = 1:80]
+trajs_full = [generate_data_pendcart(1.5) for i = 1:80]
 trajs_meas = map(trajs_full) do (_,t)
     [copy(c) for c in eachcol(t)]
 end
@@ -115,21 +112,36 @@ const dy2 = MvNormal(2, 0.05f0)
 const nz = 3
 const ny = 2
 const nu = 0
-nh  = 30
-np = 1
+nh  = 20
+np = 50
+const nα = 5
+const αnet = Chain(Dense(nz,nα), softmax)
+const A = [(0.001randn(nz,nz)) for _ = 1:nα]
+const C = [(0.001randn(nz,nz)) for _ = 1:nα]
+function f(z,w)
+    α  = αnet(z)
+    Ai = sum(α.*A)
+    Ci = sum(α.*C)
+    z  = Ai*z + Ci*w
+end
 const g  = Chain(Dense(nz,nh,tanh), Dense(nh,ny))
 const z0 = Chain(Dense(nz,nh,tanh), Dense(nh,nz))
 const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
-const fn  = Chain(Dense(2nz+nu,nh,tanh), Dense(nh,nz))
-f(z,noise) = fn([z;noise]) #(z,noise,t) -> fn(z) .+  8cos(1.2*t) .+ noise
-const kn  = Chain(Dense(nz+ny,nh,tanh), Dense(nh,2nz))
-k(z,y) = kn([z;y])
-pars = params((fn,g,kn,z0,w0))
+# const fn  = Chain(Dense(2nz+nu,nh,tanh), Dense(nh,nz))
+const kn  = Chain(Dense(3ny,nh,tanh), Dense(nh,2nz))
+function k(z,y)
+    yh = g(z)
+    kn([yh;hstack(y, np);hstack(mean(yh,dims=2), np)])
+end
+pars = params((A...,C...,αnet,g,kn,z0,w0))
 
-function train(loss, ps, dataset, opt; cb=i->nothing)
+
+function train(loss, ps, dataset, opt; cb=i->nothing, schedule=I->copy(opt.eta))
     @progress for (i,d) in enumerate(dataset)
+        I = length(loss1)+1
+        opt.eta = schedule(I)
         # Flux.reset!(model)
-        (l1,l2), back = Zygote.forward(()->loss(length(loss1)+1, d), ps)
+        (l1,l2), back = Zygote.forward(()->loss(I, d), ps)
         grads = back((1f0,1f0))
         push!(loss1, l1)
         push!(loss2, l2)
@@ -146,8 +158,8 @@ loss2 = Float64[]
 cb = function (i=0)
     i % 1500 == 0 || return
     lm = [loss1 loss2]
-    # lm = length(loss1) > Ta ? lm[Ta:end,:] : lm
-    # lm = filt(ones(40), [40], lm, fill(lm[1,1], 39))
+    lm = length(loss1) > Ta ? lm[Ta:end,:] : lm
+    lm = filt(ones(40), [40], lm, fill(lm[1,1], 39))
     fig = plot(lm, layout=3, sp=1, yscale=minimum(lm) < 0 ? :identity : :log10)
 
     yh,_,_ = sim(trajs_meas[1])
@@ -167,7 +179,7 @@ end
 
 function sim(y, feedback=true)
     T   = length(y)
-    z   = z0(samplenet(w0([y[1];y[2];y[3];y[4]]), nz, np)[3])
+    z   = z0(samplenet(w0([y[1];y[2];y[3];y[4]]))[3])
     yh = []
     # yh2 = []
     zh  = []
@@ -176,12 +188,12 @@ function sim(y, feedback=true)
         ŷ   = g(z)
         push!(yh, ŷ)
         e   = y[t] .- ŷ
-        μ, σ, w = samplenet(k(z,y[t+1]), nz, np)
+        μ, σ, w = samplenet(k(z,y[t+1]))
         push!(zh, mean(z, dims=2)[:])
         push!(zp, z)
         ŷ   = g(z)
         # push!(yh2, ŷ)
-        z   = f(z, feedback.*(μ+0*randn(nz,np)))
+        z   = f(z, feedback.*w)
     end
     yh, zh, zp
 end
@@ -195,55 +207,71 @@ function varloss(e)
     sum(0.5*(abs2(μ[i])/σ²[i] + log(2π)) + log(√(σ²[i]))  for i in eachindex(μ))
 end
 
-function samplenet(μσ,r,c)
-    μ = μσ[1:end÷2]
-    σ = exp.(μσ[(end÷2+1):end])
-    w = μ .+ σ .* randn(Float32,r,c)
+function partlik(e, σ)
+    w = mapcols(e->-0.5*sum(abs2.(e)./σ^2), e)
+    offset = maximum(w)
+    log(sum(w->exp(w - offset), w)) + offset - log(np)
+end
+
+Base.size(b::Zygote.Buffer) = size(b.data)
+const wbuf = Zygote.Buffer(randn(Float32,nz,np))
+function samplenet(μσ)
+    μ = μσ[1:end÷2,:]
+    σ = exp.(μσ[(end÷2+1):end,:])
+    # wbuf.freeze = false
+    # for i in 1:np
+    #     wbuf[:,i] = μ .+ σ .* randn.(Float32)
+    # end
+    w = μ .+ σ .* randn(Float32, nz, np)
     μ, σ, w
 end
+
 
 function loss(i,y)
     T = length(y)
     c = min(1, 0.01 + i/Ta)
-    μ, σ, w = samplenet(w0([y[1];y[2];y[3];y[4]]), nz, np)
+    μ, σ, w = samplenet(w0([y[1];y[2];y[3];y[4]]))
     z = z0(w) # The first state should be a sample!
     l1 = 0f0
-    l2 = klng(μ, σ, c)
+    l2 = sum(klng.(μ, σ, c))
     for t in 1:length(y)-1
         ŷ   = g(z)
         e   = y[t] .- ŷ
+        l1 -= partlik(e, 0.05)
+        # l1 += kl(e, zeros(ny), 0.05*ones(ny))
+        # l1 += varloss(e)
         # l1 += varloss(e, [0.05, 0.05])
-        l1 += sum(x->norm(x)^2,e)/np
-        μ, σ, w = samplenet(k(z,y[t+1]), nz, np)
+        # l1 += sum(x->norm(x)^2,e)/np
+        μ, σ, w = samplenet(k(z,y[t+1]))
         # μ,σ2 = stats(zc)
-        l2  += klng(μ, σ, c)
+        l2 += kl(w, zeros(nz), ones(nz), c)
+        # l2 += sum(klng.(μ, σ, c))/np
+        # l2  += klng(mean(μ, dims=2), mean(σ, dims=2), c)
         # ŷ   = g(zc)
         # e   = y[t] .- ŷ
         # l2 += varloss(e)
         # l2 += sum(x->norm(x)^2,e)/np
-        # l2 += kl(e, dy2)
-        # α  = 0.1#max(0.01, 1 - 0.01t)
-        # zf = zc*α + z*(1-α)
         z = f(z, w)
     end
-    c*Float32(l1/T), Float32(l2/T)
+    Float32(c*l1/T), Float32(l2/T)
 end
 # ll = loss(y)[2]
 
 # loss(first(datas)...)
-opt = ADAGrad(0.02f0)
+opt = ADAGrad(0.01f0)
+sched = I -> (I ÷ 2000) % 2 == 0 ? 0.01 : 0.05
 # opt = RMSProp(0.005f0)
 # opt = Nesterov(0.001)
-# opt = ADAM(0.02)
+# opt = ADAM(0.01)
 Zygote.refresh()
-# (l1,l2), back = Zygote.forward(()->loss(trajs_meas[1]), pars)
-# grads = back((1f0,1f0))
+(l1,l2), back = Zygote.forward(()->loss(1,trajs_meas[1]), pars)
+grads = back((1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
-train(loss, pars, IterTools.ncycle(trajs_meas, 1000), opt, cb=cb)
-yh,zh,zp = sim(trajs_meas[1], false)
-
+train(loss, pars, IterTools.ncycle(trajs_meas, 1000), opt, cb=cb, schedule=sched)
 ##
-plot(reduce(hcat,trajs_meas[1])', layout=2)
+i = 3
+yh,zh,zp = sim(trajs_meas[i], false)
+plot(reduce(hcat,trajs_meas[i])', layout=2)
 scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.5,:black), sp=1, markerstrokecolor=:auto)
 scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto) |> display
 

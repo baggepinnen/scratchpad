@@ -28,16 +28,6 @@ end
 const h = 0.1
 const Ta = 5000
 
-@changeprecision Float32 function generate_data_test(T)
-    f(x,t) = 0.5x + 25x/(1 + x^2) + 8cos(1.2*t)
-    g(x) = 0.05x^2
-    x = [randn()]
-    for t = 1:T
-        push!(x, f(x[end], t) + randn())
-    end
-    x', g.(x)' .+ randn.()
-end
-
 @changeprecision Float32 function pendcart(xd,x,p,t)
     g = 9.82; l = 1.0; d = 0.5
     u = 0
@@ -103,7 +93,7 @@ end
 # Zygote.gradient(e->kl(e,dy), randn(1,10))
 
 ##
-trajs_full = [generate_data_pendcart(1) for i = 1:80]
+trajs_full = [generate_data_pendcart(2) for i = 1:80]
 trajs_meas = map(trajs_full) do (_,t)
     [copy(c) for c in eachcol(t)]
 end
@@ -118,22 +108,31 @@ const nu = 0
 nh  = 30
 np = 1
 const g  = Chain(Dense(nz,nh,tanh), Dense(nh,ny))
-const z0 = Chain(Dense(nz,nh,tanh), Dense(nh,nz))
-const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
+const z0 = Chain(Dense(4ny,nh,tanh), Dense(nh,nz))
+# const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
 const fn  = Chain(Dense(2nz+nu,nh,tanh), Dense(nh,nz))
-f(z,noise) = fn([z;noise]) #(z,noise,t) -> fn(z) .+  8cos(1.2*t) .+ noise
-const kn  = Chain(Dense(nz+ny,nh,tanh), Dense(nh,2nz))
-k(z,y) = kn([z;y])
-pars = params((fn,g,kn,z0,w0))
+f(z,noise) = fn([z;noise]) + 0.5z #(z,noise,t) -> fn(z) .+  8cos(1.2*t) .+ noise
+const kn  = Chain(Dense(nz+ny,nh,tanh), Dense(nh,nz))
+function k(z,e)
+    kn([z;e])
+end
 
-function train(loss, ps, dataset, opt; cb=i->nothing)
+pars = params((fn,g,kn,z0))
+parsim = params((fn,g,z0))
+
+function train(loss, ps, pss, dataset, opt, opts; cb=i->nothing)
     @progress for (i,d) in enumerate(dataset)
         # Flux.reset!(model)
         (l1,l2), back = Zygote.forward(()->loss(length(loss1)+1, d), ps)
         grads = back((1f0,1f0))
+        Flux.Optimise.update!(opt, ps, grads)
+        l4, back = Zygote.forward(()->simloss(length(loss1)+1, d), pss)
+        grads = back(1f0)
+        Flux.Optimise.update!(opts, pss, grads)
         push!(loss1, l1)
         push!(loss2, l2)
-        Flux.Optimise.update!(opt, ps, grads)
+        # push!(loss3, l3)
+        push!(loss4, l4)
         cb(i)
     end
 end
@@ -142,21 +141,25 @@ const ⊗ = Zygote.dropgrad
 
 loss1 = Float64[]
 loss2 = Float64[]
+loss3 = Float64[]
+loss4 = Float64[]
 
 cb = function (i=0)
-    i % 1500 == 0 || return
-    lm = [loss1 loss2]
+    i % 10000 == 0 || return
+    lm = [loss1 loss2 loss4]
     # lm = length(loss1) > Ta ? lm[Ta:end,:] : lm
-    # lm = filt(ones(40), [40], lm, fill(lm[1,1], 39))
+    lm = filt(ones(80), [80], lm, fill(lm[1,1], 79))
     fig = plot(lm, layout=3, sp=1, yscale=minimum(lm) < 0 ? :identity : :log10)
 
-    yh,_,_ = sim(trajs_meas[1])
+    yh,yh2,_,_ = sim(trajs_meas[1])
     ##
     plot!(reduce(hcat,trajs_meas[1])', sp=2:3)
-    scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.2,:green), sp=2, markerstrokecolor=:auto)
-    scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:green), sp=3, markerstrokecolor=:auto)
+    scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.2,:red), sp=2, markerstrokecolor=:auto)
+    scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:red), sp=3, markerstrokecolor=:auto)
+    scatter!(reduce(hcat, getindex.(yh2, 1, :))', m=(2,0.2,:green), sp=2, markerstrokecolor=:auto)
+    scatter!(reduce(hcat, getindex.(yh2, 2, :))', m=(2,0.2,:green), sp=3, markerstrokecolor=:auto)
 
-    yh,zh,zp = sim(trajs_meas[1], false)
+    yh,yh2,zh,zp = sim(trajs_meas[1], false)
 
     scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.2,:black), sp=2, markerstrokecolor=:auto)
     scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:black), sp=3, markerstrokecolor=:auto)
@@ -167,23 +170,24 @@ end
 
 function sim(y, feedback=true)
     T   = length(y)
-    z   = z0(samplenet(w0([y[1];y[2];y[3];y[4]]), nz, np)[3])
+    z   = z0([y[1];y[2];y[3];y[4]])
     yh = []
-    # yh2 = []
+    yh2 = []
     zh  = []
     zp  = []
     for t in 1:length(y)-1
         ŷ   = g(z)
         push!(yh, ŷ)
         e   = y[t] .- ŷ
-        μ, σ, w = samplenet(k(z,y[t+1]), nz, np)
+        zc = k(z,feedback.*e)
+        z += zc
         push!(zh, mean(z, dims=2)[:])
         push!(zp, z)
         ŷ   = g(z)
-        # push!(yh2, ŷ)
-        z   = f(z, feedback.*(μ+0*randn(nz,np)))
+        push!(yh2, ŷ)
+        z   = f(z, randn(nz,np))
     end
-    yh, zh, zp
+    yh, yh2, zh, zp
 end
 
 function varloss(e,σ)
@@ -205,52 +209,67 @@ end
 function loss(i,y)
     T = length(y)
     c = min(1, 0.01 + i/Ta)
-    μ, σ, w = samplenet(w0([y[1];y[2];y[3];y[4]]), nz, np)
-    z = z0(w) # The first state should be a sample!
-    l1 = 0f0
-    l2 = klng(μ, σ, c)
+    z = z0([y[1];y[2];y[3];y[4]]) .+ 0.01randn(nz,np)
+    l1 = l2 = l3 = 0f0
     for t in 1:length(y)-1
         ŷ   = g(z)
         e   = y[t] .- ŷ
         # l1 += varloss(e, [0.05, 0.05])
         l1 += sum(x->norm(x)^2,e)/np
-        μ, σ, w = samplenet(k(z,y[t+1]), nz, np)
-        # μ,σ2 = stats(zc)
-        l2  += klng(μ, σ, c)
-        # ŷ   = g(zc)
-        # e   = y[t] .- ŷ
-        # l2 += varloss(e)
-        # l2 += sum(x->norm(x)^2,e)/np
-        # l2 += kl(e, dy2)
-        # α  = 0.1#max(0.01, 1 - 0.01t)
-        # zf = zc*α + z*(1-α)
-        z = f(z, w)
+        zc  = k(z,e)
+        z   = z + zc
+        l3 += sum(abs2, zc)/np
+        ŷ   = g(z)
+        e   = y[t] .- ŷ
+        l2  += sum(x->norm(x)^2,e)/np
+        z = f(⊗(z), randn(nz,np))
     end
-    c*Float32(l1/T), Float32(l2/T)
+    Float32(l1/T), Float32(l2/T)
+end
+function simloss(i,y)
+    T = length(y)
+    c = min(1, 0.01 + i/Ta)
+    z = z0([y[1];y[2];y[3];y[4]]) .+ randn(nz,np)
+    l1  = 0f0
+    for t in 1:length(y)-1
+        ŷ   = g(z)
+        e   = y[t] .- ŷ
+        # l1 += varloss(e, [0.05, 0.05])
+        l1 += sum(x->norm(x)^2,e)/np
+        z = f(z, randn(nz,np))
+    end
+    Float32(l1/T)
 end
 # ll = loss(y)[2]
 
 # loss(first(datas)...)
-opt = ADAGrad(0.02f0)
+opt = ADAGrad(0.05f0)
+opts = ADAGrad(0.05f0)
 # opt = RMSProp(0.005f0)
 # opt = Nesterov(0.001)
 # opt = ADAM(0.02)
 Zygote.refresh()
-# (l1,l2), back = Zygote.forward(()->loss(trajs_meas[1]), pars)
-# grads = back((1f0,1f0))
+# (l1,l2), back = Zygote.forward(()->loss(1,trajs_meas[1]), pars)
+# grads = back((1f0,1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
-train(loss, pars, IterTools.ncycle(trajs_meas, 1000), opt, cb=cb)
-yh,zh,zp = sim(trajs_meas[1], false)
+train(loss, pars, parsim, IterTools.ncycle(trajs_meas, 2000), opt, opts, cb=cb)
 
 ##
-plot(reduce(hcat,trajs_meas[1])', layout=2)
-scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.5,:black), sp=1, markerstrokecolor=:auto)
-scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto) |> display
+i = 3
+yh,yh2,zh,zp = sim(trajs_meas[i], true)
+plot(reduce(hcat,trajs_meas[i])', layout=2)
+scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.5,:red), sp=1, markerstrokecolor=:auto)
+scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:red), sp=2, markerstrokecolor=:auto)
+scatter!(reduce(hcat, getindex.(yh2, 1, :))', m=(2,0.5,:green), sp=1, markerstrokecolor=:auto)
+scatter!(reduce(hcat, getindex.(yh2, 2, :))', m=(2,0.5,:green), sp=2, markerstrokecolor=:auto)
+yh,yh2,zh,zp = sim(trajs_meas[i], false)
+scatter!(reduce(hcat, getindex.(yh2, 1, :))', m=(2,0.5,:black), sp=1, markerstrokecolor=:auto)
+scatter!(reduce(hcat, getindex.(yh2, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto) |> display
 
 ## Plot tubes
 
 Z = map(1:length(trajs_state)) do i
-    yh,zh,_ = sim(trajs_meas[i])
+    yh,yh2,zh,_ = sim(trajs_meas[i])
     zh = reduce(hcat, zh)'
     zmat = reduce(hcat,trajs_state[i])'[1:end-1,:]
     zmat[:,1] .= mod2pi.(zmat[:,1])
@@ -278,7 +297,7 @@ plot(plots...) |> display
 
 
 i = 1
-yh,zh,zp = sim(trajs_meas[i])
+yh,yh2,zh,zp = sim(trajs_meas[i])
 zmat = reduce(hcat,trajs_state[i])'
 plots = map(1:nz) do j
     global zp
