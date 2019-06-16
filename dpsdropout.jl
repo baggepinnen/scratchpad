@@ -10,21 +10,6 @@ default(lab="", grid=false)
 # include("SkipRNN.jl")
 Random.seed!(0)
 
-@userplot Eigvalplot
-@recipe function eigvalplot(A::Eigvalplot)
-    e = data(A.args[1]) |> eigvals# .|> log
-    title --> "Eigenvalues"
-    ar = range(0, stop=2pi, length=40)
-    @series begin
-        linestyle := :dash
-        color := :black
-        cos.(ar), sin.(ar)
-    end
-    @series begin
-        seriestype := :scatter
-        real.(e), imag.(e)
-    end
-end
 
 const h = 0.1
 const Ta = 5000
@@ -35,16 +20,6 @@ function hstack(xs, n)
         buf[:, i] = xs
     end
     return copy(buf)
-end
-
-@changeprecision Float32 function generate_data_test(T)
-    f(x,t) = 0.5x + 25x/(1 + x^2) + 8cos(1.2*t)
-    g(x) = 0.05x^2
-    x = [randn()]
-    for t = 1:T
-        push!(x, f(x[end], t) + randn())
-    end
-    x', g.(x)' .+ randn.()
 end
 
 @changeprecision Float32 function pendcart(xd,x,p,t)
@@ -135,18 +110,24 @@ function k(z,e)
 end
 pars = params((fn,g,kn,z0,w0))
 
-
-function train(loss, ps, dataset, opt; cb=i->nothing, schedule=I->copy(opt.eta))
-    @progress for (i,d) in enumerate(dataset)
-        I = length(loss1)+1
-        opt.eta = schedule(I)
-        # Flux.reset!(model)
-        (l1,l2), back = Zygote.forward(()->loss(I, d), ps)
-        grads = back((1f0,1f0))
-        push!(loss1, l1)
-        push!(loss2, l2)
-        Flux.Optimise.update!(opt, ps, grads)
-        cb(i)
+Base.:(+)(a::Tuple{Float32,Float32}, b::Tuple{Float32,Float32}) = (a[1]+b[1], a[2]+b[2])
+Base.:(/)(a::Tuple{Float32,Float32}, b::Real) = (a[1]/b, a[2]/b)
+function train(loss, ps, dataset, epochs, opt; cb=i->nothing, schedule=I->copy(opt.eta), bs=2)
+    @assert length(dataset) % bs == 0 "bs must divide length(dataset)"
+    @progress for epoch = 1:epochs
+        for i = 1:bs:length(dataset)-bs+1
+            I = length(loss1)+1
+            opt.eta = schedule(I)
+            # Flux.reset!(model)
+            (l1,l2), back = Zygote.forward(ps) do
+                mean(loss(I, d) for d in dataset[i:i+bs-1])
+            end
+            grads = back((1f0,1f0))
+            push!(loss1, l1)
+            push!(loss2, l2)
+            Flux.Optimise.update!(opt, ps, grads)
+            cb(I*bs)
+        end
     end
 end
 
@@ -270,9 +251,9 @@ Zygote.refresh()
 (l1,l2), back = Zygote.forward(()->loss(1,trajs_meas[1]), pars)
 grads = back((1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
-train(loss, pars, IterTools.ncycle(trajs_meas, 1000), opt, cb=cb, schedule=sched)
+train(loss, pars, trajs_meas, 1000, opt, cb=cb, schedule=sched, bs=4)
 ##
-i = 2
+i = 3
 yh,zh,zp = sim(trajs_meas[i], false, true)
 YH = reduce(hcat,mean.(yh, dims=2)[:])'
 plot(reduce(hcat,trajs_meas[i])', layout=2)
@@ -293,7 +274,7 @@ end
 zh   = reduce(vcat, getindex.(Z,1))
 zmat = reduce(vcat, getindex.(Z,2))
 s    = svd(zh .- mean(zh, dims=1))
-zh   = s.U.*s.S'
+# zh   = s.U.*s.S'
 
 fig = plot(layout=2)
 scatter3d!(eachcol(zh)..., m=(2,), zcolor=zmat[:,1], sp=1, markerstrokealpha=0, layout=2)
