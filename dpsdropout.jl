@@ -179,7 +179,7 @@ end
 
 function sim(y, feedback=true, noise=true)
     T   = length(y)
-    z   = z0(samplenet(w0([y[1];y[2];y[3];y[4]]))[3])
+    z   = z0(samplenet(w0([y[1];y[2];y[3];y[4]]),noise)[3])
     yh = []
     # yh2 = []
     zh  = []
@@ -193,7 +193,7 @@ function sim(y, feedback=true, noise=true)
         push!(zp, z)
         # ŷ   = g(z)
         # push!(yh2, ŷ)
-        z   = f(z, zc + randn(nz,np))
+        z   = f(z, zc + noise*randn(nz,np))
     end
     yh, zh, zp
 end
@@ -215,14 +215,14 @@ end
 
 Base.size(b::Zygote.Buffer) = size(b.data)
 const wbuf = Zygote.Buffer(randn(Float32,nz,np))
-function samplenet(μσ)
+function samplenet(μσ, noise=true)
     μ = μσ[1:end÷2,:]
     σ = exp.(μσ[(end÷2+1):end,:])
     # wbuf.freeze = false
     # for i in 1:np
     #     wbuf[:,i] = μ .+ σ .* randn.(Float32)
     # end
-    w = μ .+ σ .* randn(Float32, nz, np)
+    w = μ .+ σ .* randn(Float32, nz, np).*noise
     μ, σ, w
 end
 
@@ -272,11 +272,13 @@ grads = back((1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
 train(loss, pars, IterTools.ncycle(trajs_meas, 1000), opt, cb=cb, schedule=sched)
 ##
-i = 5
-yh,zh,zp = sim(trajs_meas[i], false, false)
+i = 2
+yh,zh,zp = sim(trajs_meas[i], false, true)
+YH = reduce(hcat,mean.(yh, dims=2)[:])'
 plot(reduce(hcat,trajs_meas[i])', layout=2)
 scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.5,:black), sp=1, markerstrokecolor=:auto)
-scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto) |> display
+scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto)
+plot!(YH) |> display
 
 ## Plot tubes
 
@@ -291,7 +293,7 @@ end
 zh   = reduce(vcat, getindex.(Z,1))
 zmat = reduce(vcat, getindex.(Z,2))
 s    = svd(zh .- mean(zh, dims=1))
-# zh   = s.U.*s.S'
+zh   = s.U.*s.S'
 
 fig = plot(layout=2)
 scatter3d!(eachcol(zh)..., m=(2,), zcolor=zmat[:,1], sp=1, markerstrokealpha=0, layout=2)
