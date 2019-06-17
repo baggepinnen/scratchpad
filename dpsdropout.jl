@@ -22,9 +22,16 @@ function hstack(xs, n)
     return copy(buf)
 end
 
+controller(x) = if abs(sin(x[1])) <  0.2
+    θ = asin(sin(x[1]))
+    - θ - x[2]
+else
+    0.
+end
+
 @changeprecision Float32 function pendcart(xd,x,p,t)
     g = 9.82; l = 1.0; d = 0.5
-    u = 0
+    u = controller(x)
     xd[1] = x[2]
     xd[2] = -g/l * sin(x[1]) + u/l * cos(x[1]) - d*x[2]
     xd
@@ -36,8 +43,10 @@ end
     prob = ODEProblem(pendcart,u0,tspan)
     sol = solve(prob,Tsit5())
     z = reduce(hcat, sol(0:h:T).u)
-    y = vcat((sin.(z[1:1,:])), cos.(z[1:1,:])) .+ 0.05 .* randn.()
-    z,y
+    # y = vcat(abs.(sin.(z[1:1,:])), cos.(z[1:1,:])) .+ 0.05 .* randn.()
+    y = cos.(z[1:1,:]) .+ 0.05 .* randn.()
+    z[1,:] .= asin.(sin.(z[1,:]))
+    z,y, controller.(eachcol(z))
 end
 
 Zygote.@adjoint function Base.reduce(::typeof(hcat), V::AbstractVector{<:AbstractVector})
@@ -85,7 +94,7 @@ end
 
 const dy2 = MvNormal(2, 0.05f0)
 const nz = 3
-const ny = 2
+const ny = 1
 const nu = 0
 nh  = 30
 np = 10
@@ -141,18 +150,18 @@ cb = function (i=0)
     lm = [loss1 loss2]
     # lm = length(loss1) > Ta ? lm[Ta:end,:] : lm
     lm = filt(ones(40), [40], lm, fill(lm[1,1], 39))
-    fig = plot(lm, layout=3, sp=1, yscale=minimum(lm) < 0 ? :identity : :log10)
+    fig = plot(lm, layout=2, sp=1, yscale=minimum(lm) < 0 ? :identity : :log10)
 
     yh,_,_ = sim(trajs_meas[1])
     ##
-    plot!(reduce(hcat,trajs_meas[1])', sp=2:3)
+    plot!(reduce(hcat,trajs_meas[1])', sp=2)
     scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.2,:green), sp=2, markerstrokecolor=:auto)
-    scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:green), sp=3, markerstrokecolor=:auto)
+    # scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:green), sp=3, markerstrokecolor=:auto)
 
-    yh,zh,zp = sim(trajs_meas[1], false, false)
+    yh,zh,zp = sim(trajs_meas[1], false, true)
 
     scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.2,:black), sp=2, markerstrokecolor=:auto)
-    scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:black), sp=3, markerstrokecolor=:auto)
+    # scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.2,:black), sp=3, markerstrokecolor=:auto)
     display(fig)
 end
 
@@ -177,15 +186,6 @@ function sim(y, feedback=true, noise=true)
         z   = f(z, zc + noise*randn(nz,np))
     end
     yh, zh, zp
-end
-
-function varloss(e,σ)
-    μ = mean(e, dims=2)
-    sum(0.5*(abs2(μ[i])/σ[i]^2 + log(2π)) + 0*log(σ[i])  for i in eachindex(μ))
-end
-function varloss(e)
-    μ,σ² = stats(e)
-    sum(0.5*(abs2(μ[i])/σ²[i] + log(2π)) + log(√(σ²[i]))  for i in eachindex(μ))
 end
 
 function partlik(e, σ)
@@ -227,7 +227,7 @@ function loss(i,y)
         ŷ   = g(z)
         e   = y[t] .- ŷ
         l1 -= partlik(e, 0.05)
-        zc = k(z,drop(e))
+        zc  = k(z,(e))
         # μ,σ2 = stats(zc)
         # ŷ   = g(z)
         # e   = y[t] .- ŷ
@@ -251,20 +251,26 @@ Zygote.refresh()
 (l1,l2), back = Zygote.forward(()->loss(1,trajs_meas[1]), pars)
 grads = back((1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
-train(loss, pars, trajs_meas, 1000, opt, cb=cb, schedule=sched, bs=4)
+train(loss, pars, trajs_meas, 1000, opt, cb=cb, schedule=sched, bs=2)
 ##
-i = 3
-yh,zh,zp = sim(trajs_meas[i], false, true)
-YH = reduce(hcat,mean.(yh, dims=2)[:])'
-plot(reduce(hcat,trajs_meas[i])', layout=2)
-scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.5,:black), sp=1, markerstrokecolor=:auto)
-scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto)
-plot!(YH) |> display
+Random.seed!(123)
+plots = map(1:9) do i
+    # i = 10
+    z,y = generate_data_pendcart(5)
+    yt = cos.(z[1,:])
+    yh,zh,zp = sim(y, false, true)
+    YH = reduce(hcat,mean.(yh, dims=2)[:])'
+    plot(reduce(hcat,yt)', layout=1, l=(2,))
+    scatter!(reduce(hcat, getindex.(yh, 1, :))', m=(2,0.1,:black), sp=1, markerstrokecolor=:auto)
+    # scatter!(reduce(hcat, getindex.(yh, 2, :))', m=(2,0.5,:black), sp=2, markerstrokecolor=:auto)
+    plot!(YH, l=(2,), xaxis=false, ylims=(-1.1,1.1))
+end
+plot(plots...) |> display
 
 ## Plot tubes
 
 Z = map(1:length(trajs_state)) do i
-    yh,zh,_ = sim(trajs_meas[i])
+    yh,zh,_ = sim(trajs_meas[i], true, false)
     zh = reduce(hcat, zh)'
     zmat = reduce(hcat,trajs_state[i])'[1:end-1,:]
     zmat[:,1] .= mod2pi.(zmat[:,1])
@@ -291,8 +297,8 @@ plot(plots...) |> display
 ## Plot particles
 
 
-i = 1
-yh,zh,zp = sim(trajs_meas[i])
+i = 4
+yh,zh,zp = sim(trajs_meas[i], false, true)
 zmat = reduce(hcat,trajs_state[i])'
 plots = map(1:nz) do j
     global zp
