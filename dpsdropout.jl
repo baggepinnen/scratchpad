@@ -105,7 +105,8 @@ end
 # Zygote.gradient(e->kl(e,dy), randn(1,10))
 
 ##
-trajs_full = [generate_data_pendcart(3) for i = 1:80]
+# trajs_full = [generate_data_pendcart(3) for i = 1:80]
+trajs_full = [generate_data_pendcart(5, [pi-0.1, 0]), generate_data_pendcart(5, [pi+0.1, 0])]
 trajs_meas = map(trajs_full) do (_,t,_)
     [copy(c) for c in eachcol(t)]
 end
@@ -138,12 +139,12 @@ const fn  = Chain(Dense(2nz+nu,nh,tanh), Dense(nh,nh,tanh), Dense(nh,nz))
 f(z,u,noise) = fn([z;u[]*ones(1,np);noise]) + 0.9z
 const g  = Chain(Dense(nz,nh,tanh), Dense(nh,ny))
 const z0 = Chain(Dense(nz,nh,tanh), Dense(nh,nz))
-
 const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
-const kn  = Chain(Dense(nz+2ny,nh,tanh), Dense(nh,nz))
+# w0[2].b[nz+1:end] .= 1
+const kn  = Chain(Dense(nz+ny,nh,tanh), Dense(nh,nz))
 function k(z,e)
-    # kn([z;e])
-    kn([z;e;mean(e)*ones(1,np)])
+    kn([z;e])
+    # kn([z;e;mean(e)*ones(1,np)])
 end
 pars = params((fn,g,kn,z0,w0))
 
@@ -177,7 +178,7 @@ cb = function (i=0)
     i % 1000 == 0 || return
     lm = [loss1 loss2]
     # lm = length(loss1) > Ta ? lm[Ta:end,:] : lm
-    lm = filt(ones(80), [80], lm, fill(lm[1,1], 79))
+    # lm = filt(ones(80), [80], lm, fill(lm[1,1], 79))
     fig = plot(lm, layout=@layout([[a;b] c]), sp=1:2, yscale=minimum(lm) < 0 ? :identity : :log10)
 
     yh,_,_ = sim(YU[1])
@@ -240,8 +241,8 @@ Zygote.@adjoint function drop(e)
 end
 
 Zygote.@nograd function randu(nz,np)
-    # rand(Float32, nz, np) .- 0.5
-    randn(Float32, nz, np)
+    rand(Float32, nz, np) .- 0.5
+    # randn(Float32, nz, np)
 end
 
 function loss(i,yu)
@@ -272,7 +273,7 @@ end
 
 # loss(first(datas)...)
 opt = ADAGrad(0.01f0)
-sched = I -> (I ÷ 500) % 2 == 0 ? 0.01 : 0.02
+sched = I -> (I ÷ 500) % 2 == 0 ? 0.01 : 0.01
 # opt = RMSProp(0.005f0)
 # opt = Nesterov(0.001, 0.5)
 # opt = ADAM(0.01)
@@ -280,7 +281,7 @@ Zygote.refresh()
 # (l1,l2), back = Zygote.forward(()->loss(1,YU[1]), pars)
 # grads = back((1f0,1f0))
 # grads = Zygote.gradient(()->loss(trajs[1]), pars)
-train(loss, pars, YU, 1000, opt, cb=cb, schedule=sched, bs=2)
+train(loss, pars, YU, 1000, opt, cb=cb, schedule=sched, bs=1)
 ##
 Random.seed!(123)
 plots = map(1:9) do i
@@ -330,7 +331,7 @@ z,y,u = generate_data_pendcart(5, [pi+0.1, 0])
 i = 1
 # yh,zh,zp = sim((YU[i][1], YU[i][2]), false, true)
 # zmat = reduce(hcat,trajs_state[i])'
-yh,zh,zp = sim((y,u), true, true)
+yh,zh,zp = sim((y,u), false, true)
 zmat = z'
 YH = mean(reduce(vcat, yh), dims=2)
 plots = map(1:nz) do j
