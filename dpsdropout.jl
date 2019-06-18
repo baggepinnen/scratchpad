@@ -2,7 +2,7 @@
 # Gaussian ll kan hanteras analytiskt
 # kan man träna modellen på detta sättet först och sedan träna en klassisk observerare utan att rucka på f?
 # Vi kan hantera godtycklig dg, men är det vettigt att alltid anta Gaussisk df? z_post borde ändå kunna vara multimodal, tänk pf-testmodellen
-#
+# Är det vettigt att öka nz?
 cd(@__DIR__)
 using Plots, Flux, Zygote, LinearAlgebra, Statistics, Random, Printf, OrdinaryDiffEq, IterTools, Distributions, ChangePrecision, DSP, SliceMap
 using Flux: params
@@ -105,7 +105,7 @@ end
 # Zygote.gradient(e->kl(e,dy), randn(1,10))
 
 ##
-trajs_full = [generate_data_pendcart(5) for i = 1:80]
+trajs_full = [generate_data_pendcart(3) for i = 1:80]
 trajs_meas = map(trajs_full) do (_,t,_)
     [copy(c) for c in eachcol(t)]
 end
@@ -137,14 +137,15 @@ np = 20 # 10
 const fn  = Chain(Dense(2nz+nu,nh,tanh), Dense(nh,nh,tanh), Dense(nh,nz))
 f(z,u,noise) = fn([z;u[]*ones(1,np);noise]) + 0.9z
 const g  = Chain(Dense(nz,nh,tanh), Dense(nh,ny))
-const z0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
-# const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
+const z0 = Chain(Dense(nz,nh,tanh), Dense(nh,nz))
+
+const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
 const kn  = Chain(Dense(nz+2ny,nh,tanh), Dense(nh,nz))
 function k(z,e)
     # kn([z;e])
     kn([z;e;mean(e)*ones(1,np)])
 end
-pars = params((fn,g,kn,z0))
+pars = params((fn,g,kn,z0,w0))
 
 Base.:(+)(a::Tuple{Float32,Float32}, b::Tuple{Float32,Float32}) = (a[1]+b[1], a[2]+b[2])
 Base.:(/)(a::Tuple{Float32,Float32}, b::Real) = (a[1]/b, a[2]/b)
@@ -197,7 +198,7 @@ end
 function sim(yu, feedback=true, noise=true)
     y,u = yu
     T   = length(y)
-    z   = (samplenet(z0([y[1];y[2];y[3];y[4]]),noise)[3])
+    z   = z0(samplenet(w0([y[1];y[2];y[3];y[4]]),noise)[3])
     yh = []
     # yh2 = []
     zh  = []
@@ -222,16 +223,10 @@ function partlik(e, σ)
     log(sum(w->exp(w - offset), w)) + offset - log(np)
 end
 
-Base.size(b::Zygote.Buffer) = size(b.data)
-const wbuf = Zygote.Buffer(randn(Float32,nz,np))
 function samplenet(μσ, noise=true)
     μ = μσ[1:end÷2,:]
     σ = exp.(μσ[(end÷2+1):end,:])
-    # wbuf.freeze = false
-    # for i in 1:np
-    #     wbuf[:,i] = μ .+ σ .* randn.(Float32)
-    # end
-    w = μ .+ σ .* randn(Float32, nz, np).*noise
+    w = μ .+ σ .* randu(nz, np).*noise
     μ, σ, w
 end
 
@@ -244,11 +239,16 @@ Zygote.@adjoint function drop(e)
     e.*mask, x->(x.*mask,)
 end
 
+Zygote.@nograd function randu(nz,np)
+    # rand(Float32, nz, np) .- 0.5
+    randn(Float32, nz, np)
+end
+
 function loss(i,yu)
     y,u = yu
     T = length(y)
     c = min(1, 0.01 + i/Ta)
-    μ, σ, z = samplenet(z0([y[1];y[2];y[3];y[4]]))
+    z = z0(samplenet(w0([y[1];y[2];y[3];y[4]]))[3]) # TODO: this is not the same as what we had before, where the sample went into a network
     # z = z0(w) # The first state should be a sample!
     l1 = l2 = 0f0
     # l2 = sum(klng.(μ, σ, c))
@@ -263,8 +263,8 @@ function loss(i,yu)
         # l2 += varloss(e)
         # l2 += kl2(zc, c)
         # l2 -= partlik(e, 0.05)
-        l2 += sum(x->norm(x)^2,zc)/np
-        z = f(z,u[t], zc + randn(nz,np))
+        l2 += sum(x->norm(x)^2,zc)/np #- c*0.1*log(sum(stats(z)[2])) # TODO: ADDED THIS AS EXPERIMENT
+        z = f(z,u[t], zc + randu(nz,np))
     end
     Float32(c*l1/T), Float32(l2/T)
 end
@@ -326,11 +326,11 @@ plot(plots...) |> display
 
 ## Plot particles
 
-z,y,u = generate_data_pendcart(5, [pi-0.1, 0])
+z,y,u = generate_data_pendcart(5, [pi+0.1, 0])
 i = 1
 # yh,zh,zp = sim((YU[i][1], YU[i][2]), false, true)
 # zmat = reduce(hcat,trajs_state[i])'
-yh,zh,zp = sim((y,u), false, true)
+yh,zh,zp = sim((y,u), true, true)
 zmat = z'
 YH = mean(reduce(vcat, yh), dims=2)
 plots = map(1:nz) do j
@@ -340,6 +340,11 @@ plots = map(1:nz) do j
     fig = plot(zmat)
     plot!(YH, lab="")
     plot!(u')
-    scatter!(zpj, m=(2,:black,0.5), markerstrokealpha=0)
+    scatter!(zpj, m=(2,:black,0.5), markerstrokealpha=0, ylims=extrema(zmat))
 end
 plot(plots...)
+
+##
+entropy(a::Vector) = -sum(normpdf(x)*normlogpdf(x) for x in a) / length(a)
+entropy(σ::Number) = 0.5log(2π*ℯ*σ^2)
+quota(σ,N) = entropy(σ) / entropy(σ*randn(N))
