@@ -49,8 +49,8 @@ np = 1 # 10
 #     Ci = sum(α.*C)
 #     z  = Ai*z + Ci*w
 # end
-const fn  = Chain(Dense(3nz+nu,nh,tanh), Dense(nh,nh,tanh), Dense(nh,nz))
-f(z,u,zc,noise) = fn([z;u[]*ones(1,np);zc;noise]) + 0.9z
+const fn  = Chain(Dense(2nz+nu,nh,tanh), Dense(nh,nh,tanh), Dense(nh,nz))
+f(z,u,zc) = fn([z;u[]*ones(1,np);zc]) + 0.9z
 const g  = Chain(Dense(nz,nh,tanh), Dense(nh,ny))
 # attention = Chain(Dense(nz+ny, nz), LSTM(nz, np), softmax)
 # attend(z,e) = sum(attention([z;e])' .* z, dims=2)
@@ -58,9 +58,9 @@ const z0 = Chain(Dense(nz,nh,tanh), Dense(nh,nz))
 const w0 = Chain(Dense(4ny,nh,tanh), Dense(nh,2nz))
 # w0[2].b[nz+1:end] .= 1
 const kn  = Chain(Dense(nz+ny,nh,tanh), Dense(nh,nh,tanh), Dense(nh,nz))
-function k(z,e,y)
+function k(z,e)
+    # kn([z;mean(y)*ones(1,np)])
     kn([z;e])
-    # kn([z;e;mean(e)*ones(1,np)])
 end
 pars = params((fn,g,kn,z0,w0))
 
@@ -124,12 +124,14 @@ function sim(yu, feedback=true, noise=true)
         ŷ   = g(z)
         push!(yh, ŷ)
         e   = y[t] .- ŷ
-        zc = k(z,feedback.*e,feedback.*ŷ)
+        zc  = k(z,feedback.*e)
+        # μ, σ, zc = samplenet(k(z,e))
+        # μ, σ, zc = samplenet(k(z,y[t]))
         push!(zh, mean(z, dims=2)[:])
         push!(zp, z)
         # ŷ   = g(z)
         # push!(yh2, ŷ)
-        z   = f(z,u[t], zc, noise*randu(nz,np))
+        z   = f(z,u[t], zc)
     end
     yh, zh, zp
 end
@@ -147,12 +149,15 @@ function loss(i,yu)
         ŷ   = g(z)
         e   = y[t] .- ŷ
         l1 -= partlik(e, 0.05)
-        zc  = k(z,e,ŷ)
+        # μ, σ, zc  = samplenet(k(z,e))
+        zc  = k(z,e)
+        # μ, σ, zc  = samplenet(k(z,y[t]))
         # μ,σ2 = stats(zc)
         # ŷ   = g(z)
         # e   = y[t] .- ŷ
+        # l2 += sum(klng.(μ, σ, c))
         l2 += sum(x->norm(x)^2,zc)/np
-        z = f(z,u[t], zc, randu(nz,np))
+        z = f(z,u[t], zc)
     end
     Float32(c*l1/T), Float32(l2/T)
 end
@@ -218,7 +223,7 @@ z,y,u = generate_data_pendcart(5, [pi-0.1, 0])
 i = 1
 # yh,zh,zp = sim((YU[i][1], YU[i][2]), false, true)
 # zmat = reduce(hcat,trajs_state[i])'
-yh,zh,zp = sim((y,u), true, true)
+yh,zh,zp = sim((y,u), false, true)
 zmat = z'
 YH = mean(reduce(vcat, yh), dims=2)
 plots = map(1:nz) do j
