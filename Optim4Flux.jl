@@ -2,6 +2,8 @@ module Optim4Flux
 using LinearAlgebra, Optim, Flux, Zygote, Plots # TODO: replace for recipesbase
 import Base.copyto!
 
+export gradlength, paramlength, optfuns
+
 gradlength(grads::Zygote.Grads) = sum(length(g[1]) for g in grads.grads)
 paramlength(params::Flux.Params) = sum(length, params.params)
 Base.zeros(grads::Zygote.Grads) = zeros(gradlength(grads))
@@ -54,19 +56,19 @@ function copyto!(pars::Flux.Params, v::AbstractArray)
 end
 
 
-function Optim.OnceDifferentiable(loss, pars::Flux.Params)
+function optfuns(loss, pars::Flux.Params)
     grads = Zygote.gradient(loss, pars)
     gradvec = zeros(grads)
-    gradfun = function (w)
+    gradfun = function (g,w)
         copyto!(pars, w)
         grads = Zygote.gradient(loss, pars)
-        copyto!(gradvec, grads)
+        copyto!(g, grads)
     end
     lossfun = function (w)
         copyto!(pars, w)
         loss()
     end
-    OnceDifferentiable(lossfun, gradfun)
+    lossfun, gradfun
 end
 
 @recipe function lossplot(loss::Function, pars::Flux.Params, l=0.1)
@@ -130,9 +132,17 @@ npars = Optim4Flux.paramlength(pars)
 
 opt = ADAM(0.01)
 cb = ()-> @show loss()
-for i = 1:100
+for i = 1:5000
     grads = Zygote.gradient(loss, pars)
     Flux.Optimise.update!(opt, pars, grads)
-    plot(loss, pars,1) |> display
     @show loss()
 end
+
+plot(loss, pars,1) |> display
+
+lossfun, gradfun = optfuns(loss, pars)
+res = Optim.optimize(lossfun, gradfun, randn(paramlength(pars)))
+plot(loss, pars,0.1) |> display
+
+sp = sortperm(x[:])
+plot([y[sp] m(x)[sp]])
